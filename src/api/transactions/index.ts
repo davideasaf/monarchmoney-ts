@@ -4,6 +4,10 @@ export type {
   CreateTransactionInput,
   UpdateTransactionInput,
   TransactionSplit,
+  OptimizedTransactionSplit,
+  OptimizedSplitResult,
+  NoteUpdate,
+  BulkNoteUpdateResult,
   CreateTransactionRuleInput,
   UpdateTransactionRuleInput,
   RuleCondition,
@@ -18,4 +22,4 @@ export type {
   GetAllRecurringTransactionItemsOptions,
   BulkUpdateTransactionsInput,
   GetHiddenTransactionsOptions
-} from './TransactionsAPI'
+} from './TransactionsAPI'  
