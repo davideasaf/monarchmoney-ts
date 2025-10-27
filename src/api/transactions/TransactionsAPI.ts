@@ -694,7 +694,7 @@ export class TransactionsAPIImpl implements TransactionsAPI {
   async updateTransactionSplits(transactionId: string, splits: TransactionSplit[]): Promise<Transaction> {
     validateTransactionId(transactionId)
 
-    // Use working browser mutation (minified for 55% smaller payload)
+    // Split transaction using browser mutation
     const splitMutation = `mutation Common_SplitTransactionMutation($input:UpdateTransactionSplitMutationInput!){updateTransactionSplit(input:$input){errors{message code}transaction{id amount hasSplitTransactions splitTransactions{id amount notes merchant{name}category{id name}}}}}`
 
     const splitData = splits.map(split => ({
@@ -730,7 +730,7 @@ export class TransactionsAPIImpl implements TransactionsAPI {
 
     const transaction = splitResult.updateTransactionSplit.transaction
 
-    // Update notes in PARALLEL (50% performance improvement!)
+    // Update notes in parallel for splits that have notes
     if (transaction.splitTransactions && splits.some(s => s.notes)) {
       const bulkUpdateMutation = `mutation Common_BulkUpdateTransactionsMutation($selectedTransactionIds:[ID!]$excludedTransactionIds:[ID!]$allSelected:Boolean!$expectedAffectedTransactionCount:Int!$updates:TransactionUpdateParams!$filters:TransactionFilterInput){bulkUpdateTransactions(selectedTransactionIds:$selectedTransactionIds excludedTransactionIds:$excludedTransactionIds updates:$updates allSelected:$allSelected expectedAffectedTransactionCount:$expectedAffectedTransactionCount filters:$filters){success affectedCount errors{message}}}`
 
@@ -743,7 +743,7 @@ export class TransactionsAPIImpl implements TransactionsAPI {
 
           const splitId = transaction.splitTransactions[i].id
 
-          // Return promise (don't await yet - execute in parallel!)
+          // Return promise for parallel execution
           return this.graphql.mutation<{
             bulkUpdateTransactions: {
               success: boolean
@@ -766,7 +766,7 @@ export class TransactionsAPIImpl implements TransactionsAPI {
         })
         .filter(Boolean) // Remove nulls
 
-      // Execute all note updates in PARALLEL (huge performance win!)
+      // Execute all note updates in parallel
       await Promise.all(noteUpdatePromises)
 
       logger.info(
@@ -781,7 +781,7 @@ export class TransactionsAPIImpl implements TransactionsAPI {
   /**
    * Bulk update notes in parallel
    *
-   * Updates multiple transaction notes simultaneously instead of sequentially.
+   * Updates multiple transaction notes simultaneously.
    *
    * @param updates - Array of transaction ID + notes pairs
    * @returns Result with success/failure counts
