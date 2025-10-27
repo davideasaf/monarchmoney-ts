@@ -34,11 +34,8 @@ export interface TransactionsAPI {
   getTransactionSplits(transactionId: string): Promise<any>
   updateTransactionSplits(transactionId: string, splits: TransactionSplit[]): Promise<Transaction>
 
-  // OPTIMIZED: Split transaction with notes in parallel (50% faster)
-  splitTransactionOptimized(transactionId: string, splits: OptimizedTransactionSplit[]): Promise<OptimizedSplitResult>
-
-  // OPTIMIZED: Bulk update notes in parallel
-  bulkUpdateNotesOptimized(updates: NoteUpdate[]): Promise<BulkNoteUpdateResult>
+  // Bulk operations
+  bulkUpdateNotes(updates: NoteUpdate[]): Promise<BulkNoteUpdateResult>
 
   // Transaction rules
   getTransactionRules(): Promise<TransactionRule[]>
@@ -115,16 +112,11 @@ export interface UpdateTransactionInput {
   hideFromReports?: boolean
 }
 
-export interface TransactionSplit {
-  amount: number
-  categoryId?: string
-}
-
 /**
- * OPTIMIZED: Transaction split with notes support
- * Used by splitTransactionOptimized for parallel note updates
+ * Transaction split configuration
+ * Used when splitting transactions into multiple categories
  */
-export interface OptimizedTransactionSplit {
+export interface TransactionSplit {
   merchantName: string
   amount: number
   categoryId: string
@@ -133,24 +125,7 @@ export interface OptimizedTransactionSplit {
 }
 
 /**
- * OPTIMIZED: Result from optimized split operation
- */
-export interface OptimizedSplitResult {
-  transaction: {
-    id: string
-    hasSplitTransactions: boolean
-    splitTransactions: Array<{
-      id: string
-      amount: number
-      notes?: string
-      merchant: { name: string }
-      category: { name: string }
-    }>
-  }
-}
-
-/**
- * OPTIMIZED: Note update for bulk parallel updates
+ * Note update for bulk operations
  */
 export interface NoteUpdate {
   transactionId: string
@@ -158,7 +133,7 @@ export interface NoteUpdate {
 }
 
 /**
- * OPTIMIZED: Result from bulk note updates
+ * Result from bulk note updates
  */
 export interface BulkNoteUpdateResult {
   successful: number
@@ -719,64 +694,8 @@ export class TransactionsAPIImpl implements TransactionsAPI {
   async updateTransactionSplits(transactionId: string, splits: TransactionSplit[]): Promise<Transaction> {
     validateTransactionId(transactionId)
 
-    const mutation = `
-      mutation SplitTransaction($transactionId: String!, $splits: [SplitInput!]!) {
-        splitTransaction(transactionId: $transactionId, splits: $splits) {
-          transaction {
-            id
-            amount
-            splits {
-              id
-              amount
-              category {
-                id
-                name
-              }
-            }
-          }
-          errors {
-            field
-            messages
-          }
-        }
-      }
-    `
-
-    const result = await this.graphql.mutation<{
-      splitTransaction: {
-        transaction: Transaction
-        errors: any[]
-      }
-    }>(mutation, { transactionId, splits })
-
-    if (result.splitTransaction.errors?.length > 0) {
-      throw new Error(`Transaction split failed: ${result.splitTransaction.errors[0].messages.join(', ')}`)
-    }
-
-    return result.splitTransaction.transaction
-  }
-
-  /**
-   * OPTIMIZED: Split transaction with parallel note updates (50% faster)
-   *
-   * Uses the actual working browser mutations and executes note updates in parallel.
-   *
-   * Performance:
-   * - Sequential: ~9.4s for 3 splits with notes
-   * - Parallel: ~4.7s for 3 splits with notes (50% improvement!)
-   *
-   * @param transactionId - ID of transaction to split
-   * @param splits - Array of splits with notes
-   * @returns Optimized split result with all transaction details
-   */
-  async splitTransactionOptimized(
-    transactionId: string,
-    splits: OptimizedTransactionSplit[]
-  ): Promise<OptimizedSplitResult> {
-    validateTransactionId(transactionId)
-
-    // Step 1: Execute split mutation (minified for 55% smaller payload)
-    const splitMutation = `mutation Common_SplitTransactionMutation($input:UpdateTransactionSplitMutationInput!){updateTransactionSplit(input:$input){errors{message code}transaction{id hasSplitTransactions splitTransactions{id amount notes merchant{name}category{name}}}}}`
+    // Use working browser mutation (minified for 55% smaller payload)
+    const splitMutation = `mutation Common_SplitTransactionMutation($input:UpdateTransactionSplitMutationInput!){updateTransactionSplit(input:$input){errors{message code}transaction{id amount hasSplitTransactions splitTransactions{id amount notes merchant{name}category{id name}}}}}`
 
     const splitData = splits.map(split => ({
       merchantName: split.merchantName,
@@ -789,7 +708,15 @@ export class TransactionsAPIImpl implements TransactionsAPI {
     const splitResult = await this.graphql.mutation<{
       updateTransactionSplit: {
         errors?: Array<{ message: string; code: string }>
-        transaction: OptimizedSplitResult['transaction']
+        transaction: Transaction & {
+          splitTransactions: Array<{
+            id: string
+            amount: number
+            notes?: string
+            merchant: { name: string }
+            category: { id: string; name: string }
+          }>
+        }
       }
     }>(splitMutation, {
       input: { transactionId, splitData },
@@ -803,7 +730,7 @@ export class TransactionsAPIImpl implements TransactionsAPI {
 
     const transaction = splitResult.updateTransactionSplit.transaction
 
-    // Step 2: Update notes in PARALLEL (HUGE PERFORMANCE WIN!)
+    // Update notes in PARALLEL (50% performance improvement!)
     if (transaction.splitTransactions && splits.some(s => s.notes)) {
       const bulkUpdateMutation = `mutation Common_BulkUpdateTransactionsMutation($selectedTransactionIds:[ID!]$excludedTransactionIds:[ID!]$allSelected:Boolean!$expectedAffectedTransactionCount:Int!$updates:TransactionUpdateParams!$filters:TransactionFilterInput){bulkUpdateTransactions(selectedTransactionIds:$selectedTransactionIds excludedTransactionIds:$excludedTransactionIds updates:$updates allSelected:$allSelected expectedAffectedTransactionCount:$expectedAffectedTransactionCount filters:$filters){success affectedCount errors{message}}}`
 
@@ -816,7 +743,7 @@ export class TransactionsAPIImpl implements TransactionsAPI {
 
           const splitId = transaction.splitTransactions[i].id
 
-          // Return promise (don't await yet!)
+          // Return promise (don't await yet - execute in parallel!)
           return this.graphql.mutation<{
             bulkUpdateTransactions: {
               success: boolean
@@ -839,7 +766,7 @@ export class TransactionsAPIImpl implements TransactionsAPI {
         })
         .filter(Boolean) // Remove nulls
 
-      // Execute all note updates in PARALLEL
+      // Execute all note updates in PARALLEL (huge performance win!)
       await Promise.all(noteUpdatePromises)
 
       logger.info(
@@ -847,18 +774,19 @@ export class TransactionsAPIImpl implements TransactionsAPI {
       )
     }
 
-    return { transaction }
+    return transaction
   }
 
+
   /**
-   * OPTIMIZED: Bulk update notes in parallel
+   * Bulk update notes in parallel
    *
    * Updates multiple transaction notes simultaneously instead of sequentially.
    *
    * @param updates - Array of transaction ID + notes pairs
    * @returns Result with success/failure counts
    */
-  async bulkUpdateNotesOptimized(updates: NoteUpdate[]): Promise<BulkNoteUpdateResult> {
+  async bulkUpdateNotes(updates: NoteUpdate[]): Promise<BulkNoteUpdateResult> {
     const bulkUpdateMutation = `mutation Common_BulkUpdateTransactionsMutation($selectedTransactionIds:[ID!]$excludedTransactionIds:[ID!]$allSelected:Boolean!$expectedAffectedTransactionCount:Int!$updates:TransactionUpdateParams!$filters:TransactionFilterInput){bulkUpdateTransactions(selectedTransactionIds:$selectedTransactionIds excludedTransactionIds:$excludedTransactionIds updates:$updates allSelected:$allSelected expectedAffectedTransactionCount:$expectedAffectedTransactionCount filters:$filters){success affectedCount errors{message}}}`
 
     const promises = updates.map(({ transactionId, notes }) =>

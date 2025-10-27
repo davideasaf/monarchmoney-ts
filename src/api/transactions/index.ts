@@ -4,8 +4,6 @@ export type {
   CreateTransactionInput,
   UpdateTransactionInput,
   TransactionSplit,
-  OptimizedTransactionSplit,
-  OptimizedSplitResult,
   NoteUpdate,
   BulkNoteUpdateResult,
   CreateTransactionRuleInput,
